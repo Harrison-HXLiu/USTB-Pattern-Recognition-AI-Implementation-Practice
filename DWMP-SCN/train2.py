@@ -1,0 +1,142 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.neural_network import MLPRegressor
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ---------------------------------------------------------
+# 1. 核心模型: SimpleSCN (Stochastic Configuration Network)
+# ---------------------------------------------------------
+class SimpleSCN:
+    def __init__(self, n_hidden_nodes=500, regularization=0.0001):
+        self.L = n_hidden_nodes
+        self.C = regularization
+        self.W = None
+        self.b = None
+        self.beta = None
+
+    def _activation(self, x):
+        # Sigmoid
+        return 1 / (1 + np.exp(-x))
+
+    def fit(self, X, y):
+        input_dim = X.shape[1]
+        # 随机参数生成 (无需固定种子，增加多样性)
+        self.W = np.random.uniform(-1, 1, (input_dim, self.L))
+        self.b = np.random.uniform(-1, 1, (self.L))
+        
+        # 计算隐含层输出 H
+        H = self._activation(np.dot(X, self.W) + self.b)
+        
+        # 岭回归求解: beta = (H^T H + C I)^-1 H^T y
+        identity = np.eye(self.L)
+        # 使用伪逆增加稳定性
+        H_inv = np.linalg.pinv(np.dot(H.T, H) + self.C * identity)
+        self.beta = np.dot(np.dot(H_inv, H.T), y)
+
+    def predict(self, X):
+        H = self._activation(np.dot(X, self.W) + self.b)
+        return np.dot(H, self.beta)
+
+# ---------------------------------------------------------
+# 2. 数据准备
+# ---------------------------------------------------------
+def load_data():
+    # 生成复杂非线性数据以模拟真实工况
+    np.random.seed(42)
+    N = 1000
+    X = np.random.rand(N, 4) # 4个特征
+    # 构造强非线性 + 交互项 (Interaction)
+    # y = 10*sin(pi*x0) + 10*(x1^2)*cos(4*x0) - 5*x2 + noise
+    y = (10 * np.sin(np.pi * X[:, 0]) +
+         10 * (X[:, 1]**2) * np.cos(4 * X[:, 0]) -
+         5 * X[:, 2] + 20 + np.random.normal(0, 0.2, N))
+    
+    # 归一化
+    scaler_x = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+    X_scaled = scaler_x.fit_transform(X)
+    y_scaled = scaler_y.fit_transform(y.reshape(-1, 1)).ravel()
+    
+    return train_test_split(X_scaled, y_scaled, test_size=0.2, random_state=42), scaler_y
+
+# ---------------------------------------------------------
+# 3. 主程序
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    (X_train, X_test, y_train, y_test), scaler_y = load_data()
+    
+    # --- A. MLP 对比模型 ---
+    mlp = MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=500, random_state=42)
+    mlp.fit(X_train, y_train)
+    y_pred_mlp = mlp.predict(X_test)
+    rmse_mlp = np.sqrt(mean_squared_error(y_test, y_pred_mlp))
+    mae_mlp = mean_absolute_error(y_test, y_pred_mlp)
+    r2_mlp = r2_score(y_test, y_pred_mlp)
+    print(f"[MLP] RMSE: {rmse_mlp:.5f}, MAE: {mae_mlp:.5f}, R2: {r2_mlp:.5f}")
+
+    # --- B. Standard SCN (基准) ---
+    std_scn = SimpleSCN(n_hidden_nodes=500)
+    std_scn.fit(X_train, y_train)
+    y_pred_std = std_scn.predict(X_test)
+    rmse_std = np.sqrt(mean_squared_error(y_test, y_pred_std))
+    mae_std = mean_absolute_error(y_test, y_pred_std)
+    r2_std = r2_score(y_test, y_pred_std)
+    print(f"[Standard SCN] RMSE: {rmse_std:.5f}, MAE: {mae_std:.5f}, R2: {r2_std:.5f}")
+
+    # --- C. DWMP-SCN (本文方法) ---
+    print("正在构建 DWMP-SCN 模型池 (这可能需要几秒钟)...")
+    POOL_SIZE = 50
+    TOP_K = 10
+    SOFTMAX_LAMBDA = 80 # 增大Lambda以强化优胜劣汰
+    
+    model_pool = []
+    
+    for i in range(POOL_SIZE):
+        # Bagging: 随机采样 80%
+        X_sub, _, y_sub, _ = train_test_split(X_train, y_train, train_size=0.8, random_state=None)
+        
+        model = SimpleSCN(n_hidden_nodes=500, regularization=0.00001) # 弱正则化允许差异
+        model.fit(X_sub, y_sub)
+        
+        # 使用全量训练集评估权重
+        pred_train = model.predict(X_train)
+        rmse_train = np.sqrt(mean_squared_error(y_train, pred_train))
+        model_pool.append({'model': model, 'rmse': rmse_train})
+
+    # 筛选 Top K
+    model_pool.sort(key=lambda x: x['rmse'])
+    best_models = model_pool[:TOP_K]
+    print(f"筛选完成，保留了 Top {TOP_K} 个模型，最佳训练RMSE: {best_models[0]['rmse']:.5f}")
+
+    # Softmax 加权
+    rmses = np.array([m['rmse'] for m in best_models])
+    # 减去最小值防止浮点溢出
+    exp_w = np.exp(-SOFTMAX_LAMBDA * (rmses - np.min(rmses)))
+    weights = exp_w / np.sum(exp_w)
+
+    # 集成预测
+    y_pred_dwmp = np.zeros_like(y_test)
+    for i, m in enumerate(best_models):
+        y_pred_dwmp += weights[i] * m['model'].predict(X_test)
+
+    rmse_dwmp = np.sqrt(mean_squared_error(y_test, y_pred_dwmp))
+    mae_dwmp = mean_absolute_error(y_test, y_pred_dwmp)
+    r2_dwmp = r2_score(y_test, y_pred_dwmp)
+    
+    print(f"[DWMP-SCN] RMSE: {rmse_dwmp:.5f}, MAE: {mae_dwmp:.5f}, R2: {r2_dwmp:.5f}")
+
+    # --- 结果填空 ---
+    improvement = (rmse_std - rmse_dwmp) / rmse_std * 100
+    print("-" * 30)
+    print(">>> 论文填空数据 <<<")
+    print(f"Standard SCN RMSE: {rmse_std:.5f}")
+    print(f"DWMP-SCN RMSE:     {rmse_dwmp:.5f}")
+    print(f"RMSE 降低百分比:    {improvement:.2f}%")
+    print(f"DWMP-SCN R2 Score: {r2_dwmp:.5f}")
