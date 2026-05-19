@@ -1,0 +1,129 @@
+﻿import pandas as pd
+from pathlib import Path
+import matplotlib.pyplot as plt
+plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Arial Unicode MS"]
+plt.rcParams["axes.unicode_minus"] = False
+from sklearn.feature_selection import VarianceThreshold, RFE, SelectFromModel
+from sklearn.linear_model import LogisticRegression, LassoCV
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, classification_report
+
+
+def load_data():
+    data_path = Path(__file__).resolve().parent / "data.csv"
+    df = pd.read_csv(data_path)
+    if "id" in df.columns:
+        df = df.drop(columns=["id"])
+    df["diagnosis"] = df["diagnosis"].map({"M": 1, "B": 0})
+    X = df.drop(columns=["diagnosis"])
+    y = df["diagnosis"]
+    return X, y
+
+
+def evaluate_selector(selector, X_train, X_test, y_train, y_test, feature_names):
+    selector.fit(X_train, y_train)
+    selected_mask = selector.get_support()
+    selected_features = [name for name, keep in zip(feature_names, selected_mask) if keep]
+
+    if selected_features:
+        X_train_sel = selector.transform(X_train)
+        X_test_sel = selector.transform(X_test)
+    else:
+        X_train_sel = X_train
+        X_test_sel = X_test
+
+    clf = LogisticRegression(max_iter=1000, solver="liblinear")
+    clf.fit(X_train_sel, y_train)
+    y_pred = clf.predict(X_test_sel)
+
+    print("\n--- {} ---".format(selector.__class__.__name__))
+    print("Selected features ({}):".format(len(selected_features)))
+    print(selected_features)
+    print("Accuracy on test set: {:.4f}".format(accuracy_score(y_test, y_pred)))
+    print(classification_report(y_test, y_pred, target_names=["benign", "malignant"]))
+
+    return selected_features, accuracy_score(y_test, y_pred)
+
+
+def plot_comparison(method_names, feature_counts, accuracies, output_path):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    x = range(len(method_names))
+
+    axes[0].bar(x, feature_counts, color=["#5470C6", "#91CC75", "#FAC858", "#EE6666"])
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(method_names, fontproperties="SimHei", fontsize=10)
+    axes[0].set_ylabel("特征数量", fontproperties="SimHei", fontsize=11)
+    axes[0].set_title("不同方法选择特征数量比较", fontproperties="SimHei", fontsize=12)
+
+    axes[1].bar(x, accuracies, color=["#91CC75", "#5470C6", "#FAC858", "#EE6666"])
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(method_names, fontproperties="SimHei", fontsize=10)
+    axes[1].set_ylabel("分类准确率", fontproperties="SimHei", fontsize=11)
+    axes[1].set_ylim(0.0, 1.0)
+    axes[1].set_title("不同方法分类准确率比较", fontproperties="SimHei", fontsize=12)
+
+    for ax, values in zip(axes, [feature_counts, accuracies]):
+        for i, v in enumerate(values):
+            ax.text(i, v + 0.01, f"{v:.2f}" if isinstance(v, float) else str(v), ha='center', fontproperties="SimHei", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    print(f"对比图已保存到: {output_path}")
+
+
+def main():
+    X, y = load_data()
+    feature_names = X.columns.tolist()
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    print("Total features:", len(feature_names))
+
+    # 1. 过滤法：方差选择法
+    var_threshold = VarianceThreshold(threshold=0.01)
+    var_selected, var_acc = evaluate_selector(
+        var_threshold, X_train_scaled, X_test_scaled, y_train, y_test, feature_names
+    )
+
+    # 2. 包裹法：递归特征消除 RFE
+    base_estimator = LogisticRegression(max_iter=1000, solver="liblinear")
+    rfe = RFE(estimator=base_estimator, n_features_to_select=10, step=1)
+    rfe_selected, rfe_acc = evaluate_selector(
+        rfe, X_train_scaled, X_test_scaled, y_train, y_test, feature_names
+    )
+
+    # 3. 嵌入法：基于 Lasso 的特征选择
+    lasso = LassoCV(cv=5, random_state=42, max_iter=10000)
+    lasso_selector = SelectFromModel(estimator=lasso, threshold="mean")
+    lasso_selected, lasso_acc = evaluate_selector(
+        lasso_selector, X_train_scaled, X_test_scaled, y_train, y_test, feature_names
+    )
+
+    print("\nSummary")
+    print(f"VarianceThreshold accuracy: {var_acc:.4f}, selected {len(var_selected)} features")
+    print(f"RFE accuracy: {rfe_acc:.4f}, selected {len(rfe_selected)} features")
+    print(f"LassoSelectFromModel accuracy: {lasso_acc:.4f}, selected {len(lasso_selected)} features")
+
+    # 全部特征基线
+    clf_full = LogisticRegression(max_iter=1000, solver="liblinear")
+    clf_full.fit(X_train_scaled, y_train)
+    y_pred_full = clf_full.predict(X_test_scaled)
+    full_acc = accuracy_score(y_test, y_pred_full)
+    print(f"Full-feature accuracy: {full_acc:.4f}")
+
+    method_names = ["方差选择", "RFE", "Lasso嵌入", "全部特征"]
+    feature_counts = [len(var_selected), len(rfe_selected), len(lasso_selected), len(feature_names)]
+    accuracies = [var_acc, rfe_acc, lasso_acc, full_acc]
+    output_path = Path(__file__).resolve().parent / "feature_selection_comparison.png"
+    plot_comparison(method_names, feature_counts, accuracies, output_path)
+
+
+if __name__ == "__main__":
+    main()
