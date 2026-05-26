@@ -10,6 +10,14 @@ import matplotlib.pyplot as plt
 # 1. 数据预处理
 # =========================
 transform = transforms.Compose([
+    #1. 随机水平翻转
+    #transforms.RandomHorizontalFlip(),
+
+    # 2. 随机旋转
+    #transforms.RandomRotation(15),
+
+    # 3. 随机裁剪
+    transforms.RandomCrop(32, padding=4),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5),
                          (0.5, 0.5, 0.5))
@@ -57,9 +65,9 @@ class SimpleCNN(nn.Module):
             in_channels=3,      #初始值为3
            out_channels=32,    #初始值为32
             #out_channels=64, 
-            #kernel_size=3,      #初始值为3
-            kernel_size=5,
-            padding=2
+            kernel_size=3,      #初始值为3
+            #kernel_size=5,
+            padding=1
         )
 
         # 第2个卷积层
@@ -68,9 +76,9 @@ class SimpleCNN(nn.Module):
             #in_channels=64,
             out_channels=64,    #初始值为64
             #out_channels=128,
-            #kernel_size=3,      #初始值为3
-            kernel_size=5,
-            padding=2
+            kernel_size=3,      #初始值为3
+            #kernel_size=5,
+            padding=1
         )
 
         # 池化层
